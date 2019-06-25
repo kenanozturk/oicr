@@ -17,7 +17,7 @@ import yaml
 from sklearn.cluster import KMeans
 
 from fast_rcnn.config import cfg
-from utils.cython_bbox import bbox_overlaps
+from utils.cython_bbox import bbox_overlaps, bbox_oneway_overlaps
 
 DEBUG = False
 
@@ -139,6 +139,17 @@ def _build_graph(boxes, iou_threshold):
 
     return (overlaps > iou_threshold).astype(np.float32)
 
+def _build_oneway_graph(boxes, iou_threshold):
+    """Build graph based on box IoU"""
+    overlaps = bbox_oneway_overlaps(
+        np.ascontiguousarray(boxes, dtype=np.float),
+        np.ascontiguousarray(boxes, dtype=np.float))
+
+    return (overlaps > iou_threshold).astype(np.float32)
+
+def _order_graph(graph):
+    return np.sum(graph, axis=1).argsort()[::-1]
+
 def _get_graph_centers(boxes, cls_prob, im_labels):
     """Get graph centers."""
 
@@ -157,41 +168,75 @@ def _get_graph_centers(boxes, cls_prob, im_labels):
             boxes_tmp = boxes[idxs, :].copy()
             cls_prob_tmp = cls_prob_tmp[idxs]
 
+            # Kenan > i think the graph is n x n matrix
             graph = _build_graph(boxes_tmp, cfg.TRAIN.GRAPH_IOU_THRESHOLD)
+            oneway_graph = _build_oneway_graph(boxes_tmp, cfg.TRAIN.GRAPH_IOU_THRESHOLD)
+            
+            # Kenan > initialize the selections
+            max_gt_scores = 0
+            final_idxs = []
+            for idx in range(len(idxs)):
+                graph_tmp = graph.copy()
+                keep_idxs = []
+                gt_scores_tmp = []
+                count = cls_prob_tmp.size
+                counter = 0
+                while True:
+                    # yine bunun gibi secip graphta sifirlatip counttan cikarabiliriz
+                    order = _order_graph(graph_tmp)
+                    
+                    # delete the graph connections of more connected regions
+                    if counter < idx:
+                        tmp = [order[i] for i in range(idx)]
+                        graph_tmp[:, tmp] = 0
+                        graph_tmp[tmp, :] = 0
+                        count = count - len(tmp)
+                        order = _order_graph(graph_tmp)
+                        counter = idx + 1
 
-            keep_idxs = []
-            gt_scores_tmp = []
-            count = cls_prob_tmp.size
-            while True:
-                order = np.sum(graph, axis=1).argsort()[::-1]
-                tmp = order[0]
-                keep_idxs.append(tmp)
-                inds = np.where(graph[tmp, :] > 0)[0]
-                gt_scores_tmp.append(np.max(cls_prob_tmp[inds]))
+                    tmp = order[0]
+                    keep_idxs.append(tmp)
+                    
+                    # find the bboxeses thats captured by tmp
+                    overlaps = oneway_graph[tmp, :]
+                    cancelled_boxes_inds = np.nonzero(overlaps)
+                    # find the neighbors of tmp
+                    inds = np.where(graph_tmp[tmp, :] > 0)[0]
+                    gt_scores_tmp.append(np.max(cls_prob_tmp[inds]))
+                    # merge the regions to be deleted
+                    inds = np.union1d(cancelled_boxes_inds, inds)
 
-                graph[:, inds] = 0
-                graph[inds, :] = 0
-                count = count - len(inds)
-                if count <= 5:
-                    break
+                    graph_tmp[:, inds] = 0
+                    graph_tmp[inds, :] = 0
+                    count = count - len(inds)
+                    cond1 = count <= 5
+                    cond2 = len(keep_idxs) >= count_supervision
+                    if cond1 or cond2:
+                        break
 
-            gt_boxes_tmp = boxes_tmp[keep_idxs, :].copy()
-            gt_scores_tmp = np.array(gt_scores_tmp).copy()
+                if np.sum(gt_scores_tmp) > np.sum(max_gt_scores):
+                    max_gt_scores = gt_scores_tmp
+                    final_idxs = keep_idxs
+                
 
-            keep_idxs_new = np.argsort(gt_scores_tmp)\
-                [-1:(-1 - min(len(gt_scores_tmp), cfg.TRAIN.MAX_PC_NUM)):-1]
+            gt_boxes_tmp = boxes_tmp[final_idxs, :].copy()
+            max_gt_scores = np.array(max_gt_scores).copy()
+
+            # TODO implement count supervision
+            keep_idxs_new = np.argsort(max_gt_scores)\
+                [-1:(-1 - min(len(max_gt_scores), count_supervision)):-1]
             
             gt_boxes = np.vstack((gt_boxes, gt_boxes_tmp[keep_idxs_new, :]))
             gt_scores = np.vstack((gt_scores, 
-                gt_scores_tmp[keep_idxs_new].reshape(-1, 1)))
+                max_gt_scores[keep_idxs_new].reshape(-1, 1)))
             gt_classes = np.vstack((gt_classes, 
                 (i + 1) * np.ones((len(keep_idxs_new), 1), dtype=np.int32)))
 
             # If a proposal is chosen as a cluster center,
             # we simply delete a proposal from the candidata proposal pool,
             # because we found that the results of different strategies are similar and this strategy is more efficient
-            cls_prob = np.delete(cls_prob.copy(), idxs[keep_idxs][keep_idxs_new], axis=0)
-            boxes = np.delete(boxes.copy(), idxs[keep_idxs][keep_idxs_new], axis=0)
+            cls_prob = np.delete(cls_prob.copy(), idxs[final_idxs][keep_idxs_new], axis=0)
+            boxes = np.delete(boxes.copy(), idxs[final_idxs][keep_idxs_new], axis=0)
 
     proposals = {'gt_boxes' : gt_boxes,
                  'gt_classes': gt_classes,
