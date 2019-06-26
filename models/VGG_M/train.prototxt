@@ -5,6 +5,7 @@ layer {
   top: 'data'
   top: 'rois'
   top: 'labels'
+  top: 'counts'
   python_param {
     module: 'roi_data_layer.layer'
     layer: 'RoIDataLayer'
@@ -392,6 +393,7 @@ layer {
   bottom: "midn_prob"
   bottom: "labels"
   bottom: "ic_prob"
+  bottom: "counts"
   top: "labels_ic"
   top: "cls_loss_weights"
   top: "gt_assignment"
@@ -471,6 +473,7 @@ layer {
   bottom: "ic_prob"
   bottom: "labels"
   bottom: "ic_prob1"
+  bottom: "counts"
   top: "labels_ic1"
   top: "cls_loss_weights1"
   top: "gt_assignment1"
@@ -549,6 +552,7 @@ layer {
   bottom: "ic_prob1"
   bottom: "labels"
   bottom: "ic_prob2"
+  bottom: "counts"
   top: "labels_ic2"
   top: "cls_loss_weights2"
   top: "gt_assignment2"
